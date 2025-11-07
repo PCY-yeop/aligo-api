@@ -1,1 +1,1 @@
-# aligo-api
+# README placeholder
