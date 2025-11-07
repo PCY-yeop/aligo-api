@@ -1,144 +1,100 @@
-# app.py (ALIGO - 고정 발신번호 전용)
-# - 무조건 등록된 기본 발신번호(ALIGO_SENDER)로만 발송
-# - sp(수신자)는 to 로만 사용, from 은 항상 ENV_SENDER
-# - 실패 원인은 잔액/점검/차단 외엔 거의 사라짐
-
+# app.py (FastAPI 예시)
 import os, re, json
 from datetime import datetime
-import requests
+import httpx
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-# ========= ENV =========
-ALIGO_API_KEY = os.getenv("ALIGO_API_KEY", "")
 ALIGO_USER_ID = os.getenv("ALIGO_USER_ID", "")
-ENV_SENDER    = os.getenv("ALIGO_SENDER", "")  # 반드시 알리고에 등록/승인된 발신번호
+ALIGO_KEY     = os.getenv("ALIGO_KEY", "")
+ALIGO_SENDER  = re.sub(r"[^\d]", "", os.getenv("ALIGO_SENDER", ""))
+SERVICE_NAME  = os.getenv("SERVICE_NAME", "")
 
-if not (ALIGO_API_KEY and ALIGO_USER_ID and ENV_SENDER):
-    raise RuntimeError("ENV 누락: ALIGO_API_KEY / ALIGO_USER_ID / ALIGO_SENDER")
+if not (ALIGO_USER_ID and ALIGO_KEY and ALIGO_SENDER):
+    raise RuntimeError("ENV 누락: ALIGO_USER_ID / ALIGO_KEY / ALIGO_SENDER")
 
-# ========= APP / CORS =========
+DIGITS = re.compile(r"[^\d]")
+def only_digits(s): return DIGITS.sub("", s or "")
+
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # 운영 시 허용 도메인으로 제한 권장
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )
 
-# ========= UTILS =========
-DIGITS = re.compile(r"[^\d]")
+@app.get("/health")
+async def health():
+    return {"ok": True, "time": datetime.now().isoformat()}
 
-def only_digits(s: str) -> str:
-    return DIGITS.sub("", s or "")
-
-def build_admin_text(site: str, vd: str, vt_label: str, name: str, phone: str, memo: str) -> str:
-    """관리자에게 보낼 본문(요청한 5줄 포맷)"""
-    site_disp = site or ""
+def build_text(site, vd, vt_label, name, phone):
+    site_disp = site or SERVICE_NAME or "-"
     if site_disp and not (site_disp.startswith("[") and site_disp.endswith("]")):
         site_disp = f"[{site_disp}]"
-    time_disp = (vt_label or "").strip() or "-"
     lines = [
-        f"현장 : {site_disp or '-'}",
+        f"현장 : {site_disp}",
         f"날짜 : {vd or '-'}",
-        f"시간 : {time_disp}",
+        f"시간 : {(vt_label or '-').strip()}",
         f"이름 : {name or '-'}",
         f"연락처 : {phone or '-'}",
     ]
-    # 필요 시 메모 추가
-    # if memo: lines.append(f"메모 : {memo}")
     return "\n".join(lines)
 
-def need_lms(text: str) -> bool:
-    """
-    길이 기준으로 LMS 제목 포함 여부 결정.
-    (보수적으로 UTF-8 90바이트 초과 시 LMS 제목 추가)
-    """
-    try:
-        return len(text.encode("utf-8")) > 90
-    except Exception:
-        return True
-
-ALIGO_SEND_URL = "https://apis.aligo.in/send/"
-
-def aligo_send(sender: str, receiver: str, msg: str, title: str = "") -> dict:
-    data = {
-        "key": ALIGO_API_KEY,
-        "user_id": ALIGO_USER_ID,
-        "sender": sender,
-        "receiver": receiver,
-        "msg": msg,
-    }
-    if title:
-        data["title"] = title
-    try:
-        r = requests.post(ALIGO_SEND_URL, data=data, timeout=15)
-        try:
-            return r.json()
-        except Exception:
-            return {"result_code": "parse_error", "raw": r.text, "status": r.status_code}
-    except Exception as e:
-        return {"result_code": "request_exception", "error": str(e)}
-
-def is_success(resp: dict) -> bool:
-    return str(resp.get("result_code")) == "1"
-
-# ========= ROUTES =========
-@app.get("/health")
-async def health():
-    return {"ok": True}
-
 @app.post("/sms")
-async def sms(req: Request):
+async def send_sms(req: Request):
     """
     요청 JSON 예:
     {
-      "site": "보라매",
-      "vd": "2025-11-06",
-      "vtLabel": "10:00 ~ 11:00",
-      "name": "홍길동",
-      "phone": "01012341234",     # 고객 연락처(본문 표기용)
-      "sp": "01022844859",        # 관리자(수신자) 번호 (to)
-      "memo": ""
+      "site":"보라매", "vd":"2025-11-07",
+      "vtLabel":"10:00 ~ 11:00",
+      "name":"홍길동", "phone":"010-1234-5678",
+      "sp":"01022844859"               // 수신자(관리자) 번호
     }
     """
-    body = await req.json()
+    data = await req.json()
+    site     = (data.get("site") or "").strip()
+    vd       = (data.get("vd") or "").strip()
+    vt_label = (data.get("vtLabel") or "").strip()
+    name     = (data.get("name") or "").strip()
+    phone    = only_digits(data.get("phone"))
+    admin_sp = only_digits(data.get("sp") or "")
 
-    site     = (body.get("site") or "").strip()
-    vd       = (body.get("vd") or "").strip()
-    vt_label = (body.get("vtLabel") or "").strip()
-    name     = (body.get("name") or "").strip()
-    phone    = only_digits(body.get("phone"))
-    memo     = (body.get("memo") or "").strip()
-    admin_sp = only_digits(body.get("sp") or "")   # ← 수신자(to)
+    if not admin_sp:
+        return {"ok": False, "error": "수신자(sp) 번호 누락"}
+    if not (ALIGO_USER_ID and ALIGO_KEY and ALIGO_SENDER):
+        return {"ok": False, "error": "서버 환경변수 누락"}
 
-    sender_fixed = only_digits(ENV_SENDER)
+    text = build_text(site, vd, vt_label, name, phone)
 
-    # ---- 기본 검증 ----
-    if not site:     return {"ok": False, "error": "site 누락"}
-    if not vd:       return {"ok": False, "error": "vd(날짜) 누락"}
-    if not name:     return {"ok": False, "error": "name 누락"}
-    if not phone:    return {"ok": False, "error": "phone(고객 연락처) 누락"}
-    if not admin_sp: return {"ok": False, "error": "관리자번호(sp) 누락"}
+    # 알리고 전송: https://apis.aligo.in/send/
+    # 필수: user_id, key, sender, receiver, msg
+    payload = {
+        "user_id": ALIGO_USER_ID,
+        "key": ALIGO_KEY,
+        "sender": ALIGO_SENDER,
+        "receiver": admin_sp,     # 수신자 번호(숫자만)
+        "msg": text,
+        # 선택 파라미터 예시:
+        # "title": "[알림]",          # LMS일 때 제목
+        # "msg_type": "SMS",         # 기본은 자동판별, 강제 가능
+        # "testmode_yn": "Y",        # 테스트모드(Y)면 실제 과금 없음
+    }
 
-    if not re.fullmatch(r"\d{9,12}", admin_sp):
-        return {"ok": False, "error": "관리자번호(sp) 형식 오류(숫자만 9~12자리)"}
-    if not re.fullmatch(r"\d{9,12}", sender_fixed):
-        return {"ok": False, "error": "기본 발신번호(ALIGO_SENDER) 형식 오류 또는 미등록"}
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.post("https://apis.aligo.in/send/", data=payload)
+        try:
+            # 알리고 응답은 JSON 또는 form 형태. JSON이면 파싱
+            res = r.json()
+        except Exception:
+            # 폼/문자 응답일 수도 있어 원문 반환
+            res = {"raw": r.text}
 
-    # ---- 본문 구성 ----
-    text = build_admin_text(site, vd, vt_label, name, phone, memo)
-    title = ""
-    if need_lms(text):
-        site_disp = site.strip("[]") if site else "예약알림"
-        title = f"[{site_disp}] 방문예약"
-
-    # ---- 무조건 고정 발신번호로 전송 (from=ALIGO_SENDER, to=sp) ----
-    resp = aligo_send(sender=sender_fixed, receiver=admin_sp, msg=text, title=title)
-
-    if is_success(resp):
-        return {"ok": True, "result": resp, "from_used": sender_fixed}
-    else:
-        # 여기서 실패하면 원인은 거의 잔액부족/점검/차단/제한 등임
-        return {"ok": False, "error": "알리고 전송 실패", "detail": resp}
+    # 알리고 성공코드: result_code == '1'
+    result_code = str(res.get("result_code", ""))
+    ok = (result_code == "1")
+    return {
+        "ok": ok,
+        "aligo": res,
+        "to": admin_sp,
+        "from": ALIGO_SENDER,
+        "preview": text
+    }
