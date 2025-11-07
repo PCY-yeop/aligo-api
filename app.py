@@ -78,23 +78,23 @@ async def send_sms(req: Request):
         # "msg_type": "SMS",         # 기본은 자동판별, 강제 가능
         # "testmode_yn": "Y",        # 테스트모드(Y)면 실제 과금 없음
     }
-
+    # --- 알리고 호출 ---
     async with httpx.AsyncClient(timeout=10) as client:
         r = await client.post("https://apis.aligo.in/send/", data=payload)
         try:
-            # 알리고 응답은 JSON 또는 form 형태. JSON이면 파싱
             res = r.json()
         except Exception:
-            # 폼/문자 응답일 수도 있어 원문 반환
             res = {"raw": r.text}
 
-    # 알리고 성공코드: result_code == '1'
+    # --- 응답 정리 ---
     result_code = str(res.get("result_code", ""))
     ok = (result_code == "1")
     return {
         "ok": ok,
+        "code": result_code,
+        "message": res.get("message"),
         "aligo": res,
         "to": admin_sp,
         "from": ALIGO_SENDER,
-        "preview": text
+        "preview": text,
     }
